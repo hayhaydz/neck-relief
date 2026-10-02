@@ -1,0 +1,3 @@
+import NeckReliefCore
+
+NeckReliefMain.run()
