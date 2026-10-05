@@ -71,31 +71,20 @@ final class WindowManager {
     /// CG windows against their AX counterparts (matched by pid + size + x).
     /// Inconclusive → no flip (current macOS behavior).
     private func detectCGFlip(primaryFrame: CGRect) -> Bool {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
+        let apps = AppInfoCache()
         var probed = 0
-        for entry in list {
+        for entry in CGWindowList.onScreen().layerZero.fromRegularApps(apps).contentSized {
             guard probed < 3 else { break }
-            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-            guard let owner = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
-            guard let app = NSRunningApplication(processIdentifier: owner),
-                  app.activationPolicy == .regular else { continue }
-            guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
-            guard bounds.width >= 300 && bounds.height >= 200 else { continue }
-
             probed += 1
-            for frame in axFramesOnly(pid: owner)
-            where abs(frame.width - bounds.width) < 5
-                && abs(frame.height - bounds.height) < 5
-                && abs(frame.minX - bounds.minX) < 5 {
-                if abs(frame.minY - bounds.minY) < 10 {
+            for frame in axFramesOnly(pid: entry.ownerPID)
+            where abs(frame.width - entry.bounds.width) < 5
+                && abs(frame.height - entry.bounds.height) < 5
+                && abs(frame.minX - entry.bounds.minX) < 5 {
+                if abs(frame.minY - entry.bounds.minY) < 10 {
                     log.notice("CG probe: CG already matches AX (no flip)")
                     return false
                 }
-                let flippedY = primaryFrame.maxY - bounds.maxY
+                let flippedY = primaryFrame.maxY - entry.bounds.maxY
                 if abs(frame.minY - flippedY) < 10 {
                     log.notice("CG probe: CG is top-left origin (flip needed)")
                     return true
@@ -108,12 +97,8 @@ final class WindowManager {
 
     /// Frame-only AX window list (no CG id resolution — safe to call while probing).
     private func axFramesOnly(pid: pid_t) -> [CGRect] {
-        let appElement = AXUIElementCreateApplication(pid)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windowsValue = windowsRef else { return [] }
-        let elements = (unsafeBitCast(windowsValue, to: NSArray.self) as? [AXUIElement]) ?? []
-        return elements.compactMap { axFrame($0) }
+        AXHelpers.windowElements(of: AXUIElementCreateApplication(pid))
+            .compactMap { AXHelpers.frame(of: $0) }
     }
 
     // MARK: - Toggle
@@ -198,16 +183,16 @@ final class WindowManager {
     /// remembered away window the user fullscreened meanwhile) is taken out of
     /// fullscreen first; its post-exit frame becomes the window's real frame.
     private func withoutFullscreen(_ window: AXWindow, then action: @escaping (AXWindow) -> Void) {
-        guard axBool(window.element, AXFullscreenAttribute) else {
+        guard AXHelpers.bool(of: window.element, AXFullscreenAttribute) else {
             action(window)
             return
         }
         log.notice("window of \(self.appName(window.pid), privacy: .public) is fullscreen — exiting it first")
-        AXUIElementSetAttributeValue(window.element, AXFullscreenAttribute, kCFBooleanFalse)
+        AXHelpers.setBool(false, on: window.element, attribute: AXFullscreenAttribute)
         awaitFullscreenExitAndSettle(window.element, previousFrame: nil, deadline: .now() + 1.5) { [weak self] settled in
             guard let self = self else { return }
-            guard !self.axBool(window.element, AXFullscreenAttribute),
-                  let frame = self.axFrame(window.element) else {
+            guard !AXHelpers.bool(of: window.element, AXFullscreenAttribute),
+                  let frame = AXHelpers.frame(of: window.element) else {
                 self.onFeedback?("⚠︎ \(self.appName(window.pid)) won't exit fullscreen")
                 return
             }
@@ -237,8 +222,8 @@ final class WindowManager {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self else { return }
-            let fullscreen = self.axBool(element, AXFullscreenAttribute)
-            guard !fullscreen, let frame = self.axFrame(element) else {
+            let fullscreen = AXHelpers.bool(of: element, AXFullscreenAttribute)
+            guard !fullscreen, let frame = AXHelpers.frame(of: element) else {
                 self.awaitFullscreenExitAndSettle(element, previousFrame: nil, deadline: deadline, completion: completion)
                 return
             }
@@ -396,7 +381,7 @@ final class WindowManager {
 
         // A window whose frame can't be read would silently get a .zero frame and
         // derail the toggle.
-        guard let frame = axFrame(winElement) else {
+        guard let frame = AXHelpers.frame(of: winElement) else {
             log.notice("AX: focused window of \(self.appName(pid), privacy: .public) exposes no frame — bailing")
             return nil
         }
@@ -405,7 +390,7 @@ final class WindowManager {
                         pid: pid,
                         frame: frame,
                         cgWindowID: cgID,
-                        isMinimized: axBool(winElement, kAXMinimizedAttribute as CFString))
+                        isMinimized: AXHelpers.bool(of: winElement, kAXMinimizedAttribute as CFString))
     }
 
     /// Finds the remembered window on its home display. Liveness is AX-based (CG pid
@@ -437,20 +422,18 @@ final class WindowManager {
 
     private func axWindows(pid: pid_t) -> [AXWindow] {
         let appElement = AXUIElementCreateApplication(pid)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windowsValue = windowsRef else { return [] }
-        let elements = (unsafeBitCast(windowsValue, to: NSArray.self) as? [AXUIElement]) ?? []
-
         let primaryFrame = displayManager.currentDisplays().first?.frame ?? .zero
-        return elements.compactMap { element in
-            guard let frame = axFrame(element) else { return nil }
-            let cgID = cgWindowID(pid: pid, frame: frame, primaryFrame: primaryFrame)
+        // One CG fetch for the whole window list — resolving ids one window at
+        // a time re-scanned the list per window.
+        let cgList = CGWindowList.onScreen().layerZero
+        let apps = AppInfoCache()
+        return AXHelpers.windowElements(of: appElement).compactMap { element in
+            guard let frame = AXHelpers.frame(of: element) else { return nil }
             return AXWindow(element: element,
                             pid: pid,
                             frame: frame,
-                            cgWindowID: cgID,
-                            isMinimized: axBool(element, kAXMinimizedAttribute as CFString))
+                            cgWindowID: cgWindowID(pid: pid, frame: frame, in: cgList, apps: apps, primaryFrame: primaryFrame),
+                            isMinimized: AXHelpers.bool(of: element, kAXMinimizedAttribute as CFString))
         }
     }
 
@@ -461,32 +444,23 @@ final class WindowManager {
                                        excludingWindowID: CGWindowID?,
                                        excludingPid: pid_t,
                                        primaryFrame: CGRect) -> RevealedWindow? {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-        let myPid = getpid()
-        for entry in list {
-            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-            guard let owner = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
-            if owner == myPid || owner == excludingPid { continue }
-            if let id = entry[kCGWindowNumber as String] as? Int, CGWindowID(id) == excludingWindowID { continue }
+        let apps = AppInfoCache()
+        for entry in CGWindowList.onScreen().layerZero {
+            if entry.ownerPID == excludingPid { continue }
+            if let id = entry.id, id == excludingWindowID { continue }
 
             // Only real, user-facing apps.
-            guard let app = NSRunningApplication(processIdentifier: owner),
-                  app.activationPolicy == .regular else { continue }
+            guard apps.isRegularApp(entry.ownerPID) else { continue }
 
-            guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
             // Skip stray floating mini-windows…
-            guard bounds.width >= 300 && bounds.height >= 200 else { continue }
+            guard entry.bounds.width >= 300 && entry.bounds.height >= 200 else { continue }
             // …and screen-spanning windows like Finder's desktop (0,0 5120x1440).
-            guard bounds.width <= display.frame.width + 1,
-                  bounds.height <= display.frame.height + 1 else { continue }
+            guard entry.bounds.width <= display.frame.width + 1,
+                  entry.bounds.height <= display.frame.height + 1 else { continue }
 
-            let frame = cgToAX(bounds, primaryFrame: primaryFrame)
+            let frame = cgToAX(entry.bounds, primaryFrame: primaryFrame)
             if display.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) {
-                return RevealedWindow(pid: owner, frame: frame)
+                return RevealedWindow(pid: entry.ownerPID, frame: frame)
             }
         }
         return nil
@@ -516,51 +490,31 @@ final class WindowManager {
     /// CG window under a different pid than AX reports, so pids sharing a bundle id
     /// with `pid` are accepted too.
     private func cgWindowID(pid: pid_t, frame: CGRect, primaryFrame: CGRect) -> CGWindowID? {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-        let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-        for entry in list {
-            guard let owner = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
-            let sameOwner = owner == pid
-                || (bundleID != nil && NSRunningApplication(processIdentifier: owner)?.bundleIdentifier == bundleID)
+        cgWindowID(pid: pid, frame: frame,
+                   in: CGWindowList.onScreen().layerZero,
+                   apps: AppInfoCache(),
+                   primaryFrame: primaryFrame)
+    }
+
+    private func cgWindowID(pid: pid_t,
+                            frame: CGRect,
+                            in cgList: [CGWindowEntry],
+                            apps: AppInfoCache,
+                            primaryFrame: CGRect) -> CGWindowID? {
+        let bundleID = apps.bundleID(pid)
+        for entry in cgList {
+            let sameOwner = entry.ownerPID == pid
+                || (bundleID != nil && apps.bundleID(entry.ownerPID) == bundleID)
             guard sameOwner else { continue }
-            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-            guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
-            let candidate = cgToAX(bounds, primaryFrame: primaryFrame)
+            let candidate = cgToAX(entry.bounds, primaryFrame: primaryFrame)
             if abs(candidate.midX - frame.midX) < 50 && abs(candidate.midY - frame.midY) < 50 {
-                if let number = entry[kCGWindowNumber as String] as? Int {
-                    return CGWindowID(number)
-                }
+                return entry.id
             }
         }
         return nil
     }
 
     // MARK: - AX reads
-
-    private func axFrame(_ element: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posValue = posRef, let sizeValue = sizeRef else { return nil }
-
-        var point = CGPoint.zero
-        var size = CGSize.zero
-        AXValueGetValue(unsafeBitCast(posValue, to: AXValue.self), .cgPoint, &point)
-        AXValueGetValue(unsafeBitCast(sizeValue, to: AXValue.self), .cgSize, &size)
-        return CGRect(origin: point, size: size)
-    }
-
-    private func axBool(_ element: AXUIElement, _ attribute: CFString) -> Bool {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success,
-              let value = ref else { return false }
-        return unsafeBitCast(value, to: CFBoolean.self) == kCFBooleanTrue
-    }
 
     // MARK: - AX writes are owned by WindowMover (glide + verified landing)
 
@@ -652,39 +606,24 @@ final class WindowManager {
         }
 
         lines.append("CG windows (on-screen, layer 0, ≥300x200, regular apps):")
-        if let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                 kCGNullWindowID) as? [[String: Any]] {
-            let primaryFrame = displays.first?.frame ?? .zero
-            for entry in list {
-                guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-                guard let owner = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
-                guard let app = NSRunningApplication(processIdentifier: owner),
-                      app.activationPolicy == .regular else { continue }
-                guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
-                      let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
-                guard bounds.width >= 300 && bounds.height >= 200 else { continue }
-                let id = (entry[kCGWindowNumber as String] as? Int).map(String.init) ?? "?"
-                let frame = cgToAX(bounds, primaryFrame: primaryFrame)
-                lines.append("  cg=\(id) \(self.appName(owner)) pid=\(owner) frame=\(self.rect(frame))")
-            }
+        let primaryFrame = displays.first?.frame ?? .zero
+        let apps = AppInfoCache()
+        for entry in CGWindowList.onScreen().layerZero.fromRegularApps(apps).contentSized {
+            let id = entry.id.map(String.init) ?? "?"
+            let frame = cgToAX(entry.bounds, primaryFrame: primaryFrame)
+            lines.append("  cg=\(id) \(apps.name(entry.ownerPID)) pid=\(entry.ownerPID) frame=\(self.rect(frame))")
         }
 
         lines.append("AX windows per app:")
         var seen = Set<pid_t>()
-        if let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                 kCGNullWindowID) as? [[String: Any]] {
-            for entry in list {
-                guard let owner = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
-                guard !seen.contains(owner) else { continue }
-                guard let app = NSRunningApplication(processIdentifier: owner),
-                      app.activationPolicy == .regular else { continue }
-                seen.insert(owner)
-                let windows = axWindows(pid: owner)
-                guard !windows.isEmpty else { continue }
-                lines.append("  \(self.appName(owner)) pid=\(owner):")
-                for w in windows {
-                    lines.append("    frame=\(self.rect(w.frame)) minimized=\(w.isMinimized) cg=\(w.cgWindowID.map(String.init) ?? "nil")")
-                }
+        for entry in CGWindowList.onScreen().layerZero.fromRegularApps(apps) {
+            guard !seen.contains(entry.ownerPID) else { continue }
+            seen.insert(entry.ownerPID)
+            let windows = axWindows(pid: entry.ownerPID)
+            guard !windows.isEmpty else { continue }
+            lines.append("  \(apps.name(entry.ownerPID)) pid=\(entry.ownerPID):")
+            for w in windows {
+                lines.append("    frame=\(self.rect(w.frame)) minimized=\(w.isMinimized) cg=\(w.cgWindowID.map(String.init) ?? "nil")")
             }
         }
         return lines.joined(separator: "\n")

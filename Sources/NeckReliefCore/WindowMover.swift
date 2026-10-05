@@ -79,16 +79,16 @@ final class WindowMover {
                 timer.invalidate()
                 if self.timer === timer { self.timer = nil }
                 // Exact endpoint — interpolation at t=1 can carry float fuzz.
-                self.setAXPosition(element, destination.origin)
-                if animatesSize { self.setAXSize(element, destination.size) }
+                AXHelpers.set(position: destination.origin, on: element)
+                if animatesSize { AXHelpers.set(size: destination.size, on: element) }
                 finish()
                 return
             }
             let eased = Geometry.smoothstep(CGFloat(elapsed / self.parameters.duration))
             let step = Geometry.interpolate(from: start, to: destination, t: eased)
-            self.setAXPosition(element, step.origin)
+            AXHelpers.set(position: step.origin, on: element)
             if animatesSize {
-                self.setAXSize(element, step.size)
+                AXHelpers.set(size: step.size, on: element)
             }
         }
         RunLoop.main.add(glide, forMode: .common)
@@ -113,8 +113,8 @@ final class WindowMover {
                                 frame: CGRect,
                                 attempt: Int,
                                 completion: @escaping (Bool) -> Void) {
-        setAXSize(element, frame.size)
-        setAXPosition(element, frame.origin)
+        AXHelpers.set(size: frame.size, on: element)
+        AXHelpers.set(position: frame.origin, on: element)
 
         let verify = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
@@ -125,7 +125,7 @@ final class WindowMover {
                 return
             }
             guard attempt < self.parameters.reassertAttempts else {
-                if let actual = self.axFrame(element) {
+                if let actual = AXHelpers.frame(of: element) {
                     log.error("move refused by pid \(pid, privacy: .public): actual (\(Int(actual.minX)),\(Int(actual.minY)) \(Int(actual.width))x\(Int(actual.height))) target (\(Int(frame.minX)),\(Int(frame.minY)) \(Int(frame.width))x\(Int(frame.height)))")
                 } else {
                     log.error("move refused by pid \(pid, privacy: .public): frame unreadable")
@@ -143,7 +143,7 @@ final class WindowMover {
     // MARK: - AX plumbing
 
     private func frame(_ element: AXUIElement, matches target: CGRect) -> Bool {
-        guard let actual = axFrame(element) else { return false }
+        guard let actual = AXHelpers.frame(of: element) else { return false }
         return framesMatch(actual, target, tolerance: parameters.tolerance)
     }
 
@@ -152,32 +152,5 @@ final class WindowMover {
             && abs(a.minY - b.minY) <= tolerance
             && abs(a.width - b.width) <= tolerance
             && abs(a.height - b.height) <= tolerance
-    }
-
-    private func axFrame(_ element: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posValue = posRef, let sizeValue = sizeRef else { return nil }
-        var point = CGPoint.zero
-        var size = CGSize.zero
-        AXValueGetValue(unsafeBitCast(posValue, to: AXValue.self), .cgPoint, &point)
-        AXValueGetValue(unsafeBitCast(sizeValue, to: AXValue.self), .cgSize, &size)
-        return CGRect(origin: point, size: size)
-    }
-
-    private func setAXPosition(_ element: AXUIElement, _ point: CGPoint) {
-        var value = point
-        if let ref = AXValueCreate(.cgPoint, &value) {
-            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, ref)
-        }
-    }
-
-    private func setAXSize(_ element: AXUIElement, _ size: CGSize) {
-        var value = size
-        if let ref = AXValueCreate(.cgSize, &value) {
-            AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, ref)
-        }
     }
 }

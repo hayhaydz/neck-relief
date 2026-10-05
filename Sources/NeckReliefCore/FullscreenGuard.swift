@@ -30,22 +30,13 @@ enum FullscreenGuard {
     /// sized window on a vertically-stacked display is ruled out by requiring an
     /// AX fullscreen confirmation.)
     static func spaceHasFullscreenWindow(on display: DisplayInfo) -> Bool {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
-        for entry in list {
-            guard let layer = entry[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-            guard let owner = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
-            guard owner != getpid() else { continue }
-            guard NSRunningApplication(processIdentifier: owner)?.activationPolicy == .regular else { continue }
-            guard let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
-            guard abs(bounds.width - display.frame.width) < 2,
-                  abs(bounds.height - display.frame.height) < 2,
-                  abs(bounds.minX - display.frame.minX) < 2 else { continue }
-            if axConfirmsFullscreen(pid: owner) {
-                log.notice("display \(display.name, privacy: .public) has a fullscreen Space (pid \(owner, privacy: .public))")
+        let apps = AppInfoCache()
+        for entry in CGWindowList.onScreen().layerZero.fromRegularApps(apps) {
+            guard abs(entry.bounds.width - display.frame.width) < 2,
+                  abs(entry.bounds.height - display.frame.height) < 2,
+                  abs(entry.bounds.minX - display.frame.minX) < 2 else { continue }
+            if axConfirmsFullscreen(pid: entry.ownerPID) {
+                log.notice("display \(display.name, privacy: .public) has a fullscreen Space (pid \(entry.ownerPID, privacy: .public))")
                 return true
             }
         }
@@ -64,13 +55,7 @@ enum FullscreenGuard {
     }
 
     static func windowIsOnScreen(_ windowID: CGWindowID) -> Bool {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
-        return list.contains { entry in
-            (entry[kCGWindowNumber as String] as? Int).map { CGWindowID($0) } == windowID
-        }
+        CGWindowList.onScreen().contains { $0.id == windowID }
     }
 
     /// AX confirmation that `pid` owns a window reporting kAXFullscreenAttribute
@@ -78,21 +63,17 @@ enum FullscreenGuard {
     /// full-frame signal is trusted on its own.
     private static func axConfirmsFullscreen(pid: pid_t) -> Bool {
         let appElement = AXUIElementCreateApplication(pid)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windowsValue = windowsRef else {
-            log.notice("AX unreachable for pid \(pid, privacy: .public) — trusting CG full-frame signal")
-            return true
-        }
-        let elements = (unsafeBitCast(windowsValue, to: NSArray.self) as? [AXUIElement]) ?? []
-        for element in elements {
+        let elements = AXHelpers.windowElements(of: appElement)
+        if elements.isEmpty {
+            // Distinguish "no windows" from "AX unreadable" — only the latter
+            // trusts the CG signal on its own.
             var ref: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, AXFullscreenAttribute, &ref) == .success,
-               let value = ref,
-               unsafeBitCast(value, to: CFBoolean.self) == kCFBooleanTrue {
+            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &ref) != .success {
+                log.notice("AX unreachable for pid \(pid, privacy: .public) — trusting CG full-frame signal")
                 return true
             }
+            return false
         }
-        return false
+        return elements.contains { AXHelpers.bool(of: $0, AXFullscreenAttribute) }
     }
 }
