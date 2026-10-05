@@ -22,7 +22,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         hotKeys.onHotKey = { [weak self] direction in
             self?.windowManager.toggle(direction: direction)
         }
-        hotKeys.install()
+        if !hotKeys.install() {
+            flash("⚠︎ ⌘⌥→ is taken by another app")
+        }
 
         if !Permissions.isTrusted {
             // Open the pane once per install; after that the menu shows state quietly.

@@ -35,8 +35,6 @@ final class WindowMover {
     private var timer: Timer?
     private var pendingVerify: DispatchWorkItem?
 
-    var isMoving: Bool { timer != nil || pendingVerify != nil }
-
     // MARK: - Public
 
     /// Moves the window from `start` to `destination`, gliding unless Reduce
