@@ -2,15 +2,19 @@ import AppKit
 import ServiceManagement
 import os
 
+private let log = Logger(subsystem: "com.hayhaydz.neckrelief", category: "menu")
+
 /// Owns the status item, menu, hotkey wiring, and lightweight "flash" feedback
 /// (the plan's no-permission-needed alternative to user notifications).
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let displayManager = DisplayManager()
     private let windowManager = WindowManager()
     private let hotKeys = HotKeyManager()
     private var feedbackTimer: Timer?
+    private var trustPollTimer: Timer?
 
     override init() {
         super.init()
@@ -35,6 +39,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 Permissions.openAccessibilitySettings()
             }
             flash("⚠︎ accessibility needed — see menu")
+            beginTrustPolling()
+        }
+    }
+
+    /// Polls briefly for the Accessibility grant so the user gets a "granted"
+    /// confirmation without reopening the menu.
+    private func beginTrustPolling() {
+        trustPollTimer = Timer.scheduledTimer(withTimeInterval: Tuning.trustPollInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self = self, Permissions.isTrusted else { return }
+                self.trustPollTimer?.invalidate()
+                self.trustPollTimer = nil
+                self.flash("✓ accessibility granted")
+                log.info("accessibility granted")
+            }
         }
     }
 
@@ -64,7 +83,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        let displayManager = DisplayManager()
         let displays = displayManager.currentDisplays()
         let mouse = NSEvent.mouseLocation
         if displays.isEmpty {
@@ -141,7 +159,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         } catch {
             flash("⚠︎ login item: \(error.localizedDescription)")
         }
-        statusItem.menu = buildMenu()
+        // menuNeedsUpdate repopulates with the new state on the next open.
     }
 
     @objc private func resetState() {
@@ -151,7 +169,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func copyDiagnostics() {
         let dump = windowManager.diagnosticsDump()
-        os_log("%{public}s", dump)
+        log.notice("diagnostics dump:\n\(dump, privacy: .public)")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(dump, forType: .string)
@@ -173,7 +191,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         button.image = nil
         button.title = text
         feedbackTimer?.invalidate()
-        feedbackTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
+        feedbackTimer = Timer.scheduledTimer(withTimeInterval: Tuning.flashDuration, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.restoreIcon()
             }

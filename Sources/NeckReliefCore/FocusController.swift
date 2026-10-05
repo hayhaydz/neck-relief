@@ -27,7 +27,7 @@ final class FocusController {
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, element)
         NSRunningApplication(processIdentifier: pid)?.activate()
-        log.notice("focus → \(Format.appName(pid), privacy: .public)")
+        log.info("focus → \(Format.appName(pid), privacy: .public)")
     }
 
     /// Focuses the window of `pid` nearest `frameHint` (the captured "revealed"

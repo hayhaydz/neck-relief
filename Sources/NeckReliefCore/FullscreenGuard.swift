@@ -36,7 +36,7 @@ enum FullscreenGuard {
                   abs(entry.bounds.height - display.frame.height) < 2,
                   abs(entry.bounds.minX - display.frame.minX) < 2 else { continue }
             if axConfirmsFullscreen(pid: entry.ownerPID) {
-                log.notice("display \(display.name, privacy: .public) has a fullscreen Space (pid \(entry.ownerPID, privacy: .public))")
+                log.info("display \(display.name, privacy: .public) has a fullscreen Space (pid \(entry.ownerPID, privacy: .public))")
                 return true
             }
         }
@@ -47,7 +47,7 @@ enum FullscreenGuard {
     /// isn't (fullscreen-Space detection missed), say so via the menu bar
     /// instead of fighting the Space. The user reaches it with ⌃→ manually.
     static func hintIfHidden(windowID: CGWindowID, onFail: @escaping (String) -> Void) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Tuning.hiddenHintDelay) {
             if !windowIsOnScreen(windowID) {
                 onFail("⚠︎ Behind a fullscreen Space — press ⌃→")
             }

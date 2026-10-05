@@ -27,7 +27,7 @@ final class CoordinateSystem {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                log.notice("screen configuration changed — CG↔AX flip will be re-probed")
+                log.info("screen configuration changed — CG↔AX flip will be re-probed")
                 self?.needsFlip = nil
             }
         }
@@ -70,12 +70,12 @@ final class CoordinateSystem {
                 && abs(frame.height - entry.bounds.height) < 5
                 && abs(frame.minX - entry.bounds.minX) < 5 {
                 if abs(frame.minY - entry.bounds.minY) < 10 {
-                    log.notice("CG probe: CG already matches AX (no flip)")
+                    log.info("CG probe: CG already matches AX (no flip)")
                     return false
                 }
                 let flippedY = primaryFrame.maxY - entry.bounds.maxY
                 if abs(frame.minY - flippedY) < 10 {
-                    log.notice("CG probe: CG is top-left origin (flip needed)")
+                    log.info("CG probe: CG is top-left origin (flip needed)")
                     return true
                 }
             }

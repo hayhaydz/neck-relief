@@ -107,6 +107,7 @@ public enum Geometry {
 }
 
 /// Wraps NSScreen and provides display lookup/placement inputs.
+@MainActor
 final class DisplayManager {
 
     /// Current displays, primary first (NSScreen order guarantees this).

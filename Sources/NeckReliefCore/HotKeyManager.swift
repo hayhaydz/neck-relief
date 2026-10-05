@@ -8,6 +8,7 @@ private let log = Logger(subsystem: "com.hayhaydz.neckrelief", category: "hotkey
 ///
 /// Single binding: ⌘⌥→. One key, one verb — the toggle. Press it to bring the focused
 /// window over, press it again (from anywhere) to send it home.
+@MainActor
 final class HotKeyManager {
 
     var onHotKey: ((Direction) -> Void)?

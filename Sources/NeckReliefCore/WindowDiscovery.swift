@@ -130,13 +130,13 @@ final class WindowDiscovery {
         for candidate in candidates {
             let mid = CGPoint(x: candidate.frame.midX, y: candidate.frame.midY)
             if display.frame.contains(mid) {
-                log.notice("found away window: \(Format.appName(mem.pid), privacy: .public) frame=\(Format.rect(candidate.frame), privacy: .public)")
+                log.info("found away window: \(Format.appName(mem.pid), privacy: .public) frame=\(Format.rect(candidate.frame), privacy: .public)")
                 return (candidate, display)
             }
         }
         log.notice("\(Format.appName(mem.pid), privacy: .public) has \(candidates.count) window(s), none on origin display:")
         for c in candidates {
-            log.notice("  candidate frame=\(Format.rect(c.frame), privacy: .public) minimized=\(c.isMinimized)")
+            log.info("  candidate frame=\(Format.rect(c.frame), privacy: .public) minimized=\(c.isMinimized)")
         }
         return nil
     }
@@ -157,7 +157,7 @@ final class WindowDiscovery {
             guard apps.isRegularApp(entry.ownerPID) else { continue }
 
             // Skip stray floating mini-windows…
-            guard entry.bounds.width >= 300 && entry.bounds.height >= 200 else { continue }
+            guard entry.bounds.width >= Tuning.minContentWidth && entry.bounds.height >= Tuning.minContentHeight else { continue }
             // …and screen-spanning windows like Finder's desktop (0,0 5120x1440).
             guard entry.bounds.width <= display.frame.width + 1,
                   entry.bounds.height <= display.frame.height + 1 else { continue }
@@ -224,7 +224,7 @@ final class WindowDiscovery {
                 || (bundleID != nil && apps.bundleID(entry.ownerPID) == bundleID)
             guard sameOwner else { continue }
             let candidate = cgToAX(entry.bounds, primaryFrame: primaryFrame)
-            if abs(candidate.midX - frame.midX) < 50 && abs(candidate.midY - frame.midY) < 50 {
+            if abs(candidate.midX - frame.midX) < Tuning.cgMatchTolerance && abs(candidate.midY - frame.midY) < Tuning.cgMatchTolerance {
                 return entry.id
             }
         }

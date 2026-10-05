@@ -15,6 +15,7 @@ private let log = Logger(subsystem: "com.hayhaydz.neckrelief", category: "mover"
 /// currently is. The completion fires exactly once on the main queue — unless
 /// the move is cancelled by a successor, in which case it never fires (the
 /// successor owns the window now).
+@MainActor
 final class WindowMover {
 
     struct Parameters {
@@ -62,31 +63,35 @@ final class WindowMover {
             return
         }
 
-        log.notice("glide: pid \(pid, privacy: .public) → (\(Int(destination.minX)),\(Int(destination.minY)) \(Int(destination.width))x\(Int(destination.height))) over \(self.parameters.duration, privacy: .public)s")
+        log.info("glide: pid \(pid, privacy: .public) → (\(Int(destination.minX)),\(Int(destination.minY)) \(Int(destination.width))x\(Int(destination.height))) over \(self.parameters.duration, privacy: .public)s")
         let startTime = CACurrentMediaTime()
         let animatesSize = abs(start.width - destination.width) > 0.5
             || abs(start.height - destination.height) > 0.5
 
         let glide = Timer(timeInterval: parameters.stepInterval, repeats: true) { [weak self] timer in
-            guard let self = self else {
-                timer.invalidate()
-                return
-            }
-            let elapsed = CACurrentMediaTime() - startTime
-            if elapsed >= self.parameters.duration {
-                timer.invalidate()
-                if self.timer === timer { self.timer = nil }
-                // Exact endpoint — interpolation at t=1 can carry float fuzz.
-                AXHelpers.set(position: destination.origin, on: element)
-                if animatesSize { AXHelpers.set(size: destination.size, on: element) }
-                finish()
-                return
-            }
-            let eased = Geometry.smoothstep(CGFloat(elapsed / self.parameters.duration))
-            let step = Geometry.interpolate(from: start, to: destination, t: eased)
-            AXHelpers.set(position: step.origin, on: element)
-            if animatesSize {
-                AXHelpers.set(size: step.size, on: element)
+            // Scheduled on the main run loop — the timer block itself is
+            // nonisolated, so hop back explicitly.
+            MainActor.assumeIsolated {
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+                let elapsed = CACurrentMediaTime() - startTime
+                if elapsed >= self.parameters.duration {
+                    timer.invalidate()
+                    if self.timer === timer { self.timer = nil }
+                    // Exact endpoint — interpolation at t=1 can carry float fuzz.
+                    AXHelpers.set(position: destination.origin, on: element)
+                    if animatesSize { AXHelpers.set(size: destination.size, on: element) }
+                    finish()
+                    return
+                }
+                let eased = Geometry.smoothstep(CGFloat(elapsed / self.parameters.duration))
+                let step = Geometry.interpolate(from: start, to: destination, t: eased)
+                AXHelpers.set(position: step.origin, on: element)
+                if animatesSize {
+                    AXHelpers.set(size: step.size, on: element)
+                }
             }
         }
         RunLoop.main.add(glide, forMode: .common)
@@ -118,7 +123,7 @@ final class WindowMover {
             guard let self = self else { return }
             self.pendingVerify = nil
             if self.frame(element, matches: frame) {
-                log.notice("move verified (attempt \(attempt, privacy: .public))")
+                log.info("move verified (attempt \(attempt, privacy: .public))")
                 completion(true)
                 return
             }

@@ -75,28 +75,28 @@ final class WindowManager {
         }
 
         guard let focused = discovery.focusedWindow() else {
-            log.notice("no focused window — nothing to do")
+            log.info("no focused window — nothing to do")
             onFeedback?("⚠︎ No focused window")
             return
         }
         guard !focused.isMinimized else {
-            log.notice("focused window \(Format.appName(focused.pid), privacy: .public) is minimized")
+            log.info("focused window \(Format.appName(focused.pid), privacy: .public) is minimized")
             onFeedback?("⚠︎ Window is minimized")
             return
         }
-        log.notice("press: focused=\(Format.appName(focused.pid), privacy: .public) pid=\(focused.pid) frame=\(Format.rect(focused.frame), privacy: .public) cg=\(focused.cgWindowID.map(String.init) ?? "nil", privacy: .public)")
+        log.info("press: focused=\(Format.appName(focused.pid), privacy: .public) pid=\(focused.pid) frame=\(Format.rect(focused.frame), privacy: .public) cg=\(focused.cgWindowID.map(String.init) ?? "nil", privacy: .public)")
 
         let center = CGPoint(x: focused.frame.midX, y: focused.frame.midY)
         let source = displayManager.display(containing: center, in: displays) ?? displays[0]
-        log.notice("source display: \(source.name, privacy: .public) id=\(source.displayID)")
+        log.info("source display: \(source.name, privacy: .public) id=\(source.displayID)")
 
         // 1) The focused window IS the away window.
         if let mem = memory, discovery.sameApp(focused.pid, mem.pid), discovery.sameWindow(focused, mem) {
             if source.displayID == mem.originDisplayID {
-                log.notice("state: away window focused at home → bringing over")
+                log.info("state: away window focused at home → bringing over")
                 bringOver(away: focused, from: source.displayID, direction: direction)
             } else {
-                log.notice("state: away window focused here → sending home")
+                log.info("state: away window focused here → sending home")
                 sendHome(mem, away: focused, fallbackDisplayID: source.displayID)
             }
             return
@@ -105,14 +105,14 @@ final class WindowManager {
         // 2) Focused elsewhere: chain-flip the away window back if it exists.
         if let mem = memory, source.displayID != mem.originDisplayID {
             if let (away, originDisplay) = discovery.findHomeWindow(mem, displays: displays) {
-                log.notice("state: chain-flip → bringing \(Format.appName(mem.pid), privacy: .public) over while \(Format.appName(focused.pid), privacy: .public) keeps focus intent")
+                log.info("state: chain-flip → bringing \(Format.appName(mem.pid), privacy: .public) over while \(Format.appName(focused.pid), privacy: .public) keeps focus intent")
                 bringOver(away: away, from: originDisplay.displayID, direction: direction)
                 return
             }
             log.notice("away window not found on origin display — dropping memory")
             memory = nil
         } else if memory != nil {
-            log.notice("state: new intent on away display → replacing away window")
+            log.info("state: new intent on away display → replacing away window")
         }
 
         // 3) No (or dead) memory: outbound the focused window.
@@ -162,9 +162,9 @@ final class WindowManager {
             action(window)
             return
         }
-        log.notice("window of \(Format.appName(window.pid), privacy: .public) is fullscreen — exiting it first")
+        log.info("window of \(Format.appName(window.pid), privacy: .public) is fullscreen — exiting it first")
         AXHelpers.setBool(false, on: window.element, attribute: AXFullscreenAttribute)
-        awaitFullscreenExitAndSettle(window.element, previousFrame: nil, deadline: .now() + 1.5) { [weak self] settled in
+        awaitFullscreenExitAndSettle(window.element, previousFrame: nil, deadline: .now() + Tuning.fullscreenExitTimeout) { [weak self] settled in
             guard let self = self else { return }
             guard !AXHelpers.bool(of: window.element, AXFullscreenAttribute),
                   let frame = AXHelpers.frame(of: window.element) else {
@@ -195,7 +195,7 @@ final class WindowManager {
             completion(false)
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Tuning.settlePollInterval) { [weak self] in
             guard let self = self else { return }
             let fullscreen = AXHelpers.bool(of: element, AXFullscreenAttribute)
             guard !fullscreen, let frame = AXHelpers.frame(of: element) else {
@@ -227,15 +227,15 @@ final class WindowManager {
                                                                           excludingPid: away.pid,
                                                                           primaryFrame: displays[0].frame)
         if background {
-            log.notice("target \(target.name, privacy: .public) has a fullscreen Space → background move")
+            log.info("target \(target.name, privacy: .public) has a fullscreen Space → background move")
         } else if revealed == nil {
             log.notice("reveal capture: nothing suitable found on \(target.name, privacy: .public)")
         } else if let r = revealed {
-            log.notice("reveal capture: \(Format.appName(r.pid), privacy: .public) frame=\(Format.rect(r.frame), privacy: .public)")
+            log.info("reveal capture: \(Format.appName(r.pid), privacy: .public) frame=\(Format.rect(r.frame), privacy: .public)")
         }
 
         let newFrame = Geometry.targetFrame(window: away.frame, source: source, target: target)
-        log.notice("placement: \(Format.rect(away.frame), privacy: .public) → \(Format.rect(newFrame), privacy: .public) on \(target.name, privacy: .public)")
+        log.info("placement: \(Format.rect(away.frame), privacy: .public) → \(Format.rect(newFrame), privacy: .public) on \(target.name, privacy: .public)")
 
         memory = WindowMemory(pid: away.pid,
                               cgWindowID: away.cgWindowID,
@@ -281,20 +281,20 @@ final class WindowManager {
         let element = away.element
         mover.move(element: element, pid: mem.pid, from: away.frame, to: destination) { [weak self] success in
             guard let self = self else { return }
-            log.notice("sent \(Format.appName(mem.pid), privacy: .public) home to \(Format.rect(destination), privacy: .public) settled=\(success, privacy: .public)")
+            log.info("sent \(Format.appName(mem.pid), privacy: .public) home to \(Format.rect(destination), privacy: .public) settled=\(success, privacy: .public)")
             if !success {
                 self.onFeedback?("⚠︎ \(Format.appName(mem.pid)) resisted the move")
             }
             if mem.arrivedInBackground {
                 // Focus was never taken from the user on arrival — leave it alone.
-                log.notice("refocus: none — arrival was a background move")
+                log.info("refocus: none — arrival was a background move")
                 return
             }
             if let revealed = mem.revealed {
-                log.notice("refocus: revealed \(Format.appName(revealed.pid), privacy: .public) frame=\(Format.rect(revealed.frame), privacy: .public)")
+                log.info("refocus: revealed \(Format.appName(revealed.pid), privacy: .public) frame=\(Format.rect(revealed.frame), privacy: .public)")
                 self.focusController.focusWindow(pid: revealed.pid, frameHint: revealed.frame)
             } else {
-                log.notice("refocus: no captured reveal — falling back to topmost on \(fallbackDisplay.name, privacy: .public)")
+                log.info("refocus: no captured reveal — falling back to topmost on \(fallbackDisplay.name, privacy: .public)")
                 self.focusController.refocusTopmost(on: fallbackDisplay, excludingPid: mem.pid)
             }
         }
@@ -302,7 +302,7 @@ final class WindowManager {
 
     func resetState() {
         memory = nil
-        log.notice("state reset by user")
+        log.info("state reset by user")
     }
 
     // MARK: - Diagnostics

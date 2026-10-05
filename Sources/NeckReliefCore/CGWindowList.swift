@@ -52,6 +52,6 @@ extension [CGWindowEntry] {
     /// Windows big enough to be real content — filters stray floating
     /// mini-windows.
     var contentSized: [CGWindowEntry] {
-        filter { $0.bounds.width >= 300 && $0.bounds.height >= 200 }
+        filter { $0.bounds.width >= Tuning.minContentWidth && $0.bounds.height >= Tuning.minContentHeight }
     }
 }
