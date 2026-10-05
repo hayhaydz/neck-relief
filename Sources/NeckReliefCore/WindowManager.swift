@@ -13,12 +13,17 @@ struct RevealedWindow {
 
 /// The sticky toggle state: one window is "away" at a time, and the state survives
 /// both directions of the flip so the hotkey can be chained indefinitely.
+///
+/// `arrivedInBackground` records that the away window was parked behind a
+/// fullscreen Space on arrival (no focus was taken from the user) — sending it
+/// home then must not "restore" focus anywhere either.
 struct WindowMemory {
     let pid: pid_t
     let cgWindowID: CGWindowID?
     let originFrame: CGRect
     let originDisplayID: CGDirectDisplayID
     let revealed: RevealedWindow?
+    let arrivedInBackground: Bool
 }
 
 struct AXWindow {
@@ -31,17 +36,22 @@ struct AXWindow {
 
 /// One core verb: a sticky two-state flip.
 ///
-/// - Press with the away-window focused: it comes to you (top edge at your cursor)
-///   and takes keyboard focus.
+/// - Press with the away-window focused: it comes to you (same position, other
+///   monitor) and takes keyboard focus on arrival.
 /// - Press again — from anywhere: it returns to its exact spot and focus lands on the
 ///   window it had covered.
 /// - Press yet again: it comes back. The state persists until you focus a *different*
 ///   window on the away display and press (new intent) or reset from the menu.
+///
+/// Fullscreen never gets fought for: a fullscreen landing display gets a *background
+/// move* (window parks on its desktop Space, focus untouched), and a fullscreen
+/// window exits fullscreen before moving.
 final class WindowManager {
 
     var onFeedback: ((String) -> Void)?
 
     private let displayManager = DisplayManager()
+    private let mover = WindowMover()
     private var memory: WindowMemory?
 
     /// macOS 27 was observed returning CGWindowList bounds already in AppKit
@@ -167,56 +177,154 @@ final class WindowManager {
     }
 
     /// Moves `away` from its home display to the other one, records/refreshes the
-    /// memory (including a fresh capture of the window it will cover), and focuses it.
+    /// memory (including a fresh capture of the window it will cover), and focuses
+    /// it on arrival. A fullscreen window exits fullscreen first.
     private func bringOver(away: AXWindow, from source: DisplayInfo, displays: [DisplayInfo], direction: Direction) {
-        guard let target = displayManager.otherDisplay(than: source, in: displays, direction: direction) else {
-            log.notice("no other display found")
-            onFeedback?("⚠︎ No display that way")
-            return
-        }
-
-        let revealed = topmostRevealedWindow(on: target,
-                                             excludingWindowID: away.cgWindowID,
-                                             excludingPid: away.pid,
-                                             primaryFrame: displays[0].frame)
-        if revealed == nil {
-            log.notice("reveal capture: nothing suitable found on \(target.name, privacy: .public)")
-        } else if let r = revealed {
-            log.notice("reveal capture: \(self.appName(r.pid), privacy: .public) frame=\(self.rect(r.frame), privacy: .public)")
-        }
-
-        let mouse = NSEvent.mouseLocation
-        let newFrame = Geometry.targetFrame(window: away.frame, source: source, target: target, mouse: mouse)
-        log.notice("placement: \(self.rect(away.frame), privacy: .public) → \(self.rect(newFrame), privacy: .public) on \(target.name, privacy: .public) (mouse \(self.point(mouse), privacy: .public), cursorOnTarget=\(target.frame.contains(mouse)))")
-
-        memory = WindowMemory(pid: away.pid,
-                              cgWindowID: away.cgWindowID,
-                              originFrame: away.frame,
-                              originDisplayID: source.displayID,
-                              revealed: revealed)
-
-        setAXFrame(away.element, newFrame)
-        focusElement(away.element, pid: away.pid)
-        FullscreenGuard.ensureVisible(windowID: away.cgWindowID) { [weak self] message in
-            self?.onFeedback?(message)
+        withoutFullscreen(away) { [weak self] refreshed in
+            self?.performBringOver(away: refreshed, from: source, displays: displays, direction: direction)
         }
     }
 
     /// Returns the away window to its recorded home frame. The memory deliberately
     /// STAYS so the next press can flip it back — that's what makes it chainable.
     private func sendHome(_ mem: WindowMemory, away: AXWindow, fallbackDisplay: DisplayInfo) {
-        setAXFrame(away.element, mem.originFrame)
-        log.notice("sent \(self.appName(mem.pid), privacy: .public) home to \(self.rect(mem.originFrame), privacy: .public)")
-
-        if let revealed = mem.revealed {
-            log.notice("refocus: revealed \(self.appName(revealed.pid), privacy: .public) frame=\(self.rect(revealed.frame), privacy: .public)")
-            focusWindow(pid: revealed.pid, frameHint: revealed.frame)
-        } else {
-            log.notice("refocus: no captured reveal — falling back to topmost on \(fallbackDisplay.name, privacy: .public)")
-            refocusTopmostWindow(on: fallbackDisplay, excludingPid: away.pid)
+        withoutFullscreen(away) { [weak self] refreshed in
+            self?.performSendHome(mem, away: refreshed, fallbackDisplay: fallbackDisplay)
         }
-        FullscreenGuard.ensureVisible(windowID: away.cgWindowID) { [weak self] message in
-            self?.onFeedback?(message)
+    }
+
+    /// Runs `action` once the window is no longer native-fullscreen. macOS fights
+    /// AX moves on fullscreen windows, so a fullscreen window (focused, or the
+    /// remembered away window the user fullscreened meanwhile) is taken out of
+    /// fullscreen first; its post-exit frame becomes the window's real frame.
+    private func withoutFullscreen(_ window: AXWindow, then action: @escaping (AXWindow) -> Void) {
+        guard axBool(window.element, AXFullscreenAttribute) else {
+            action(window)
+            return
+        }
+        log.notice("window of \(self.appName(window.pid), privacy: .public) is fullscreen — exiting it first")
+        AXUIElementSetAttributeValue(window.element, AXFullscreenAttribute, kCFBooleanFalse)
+        awaitFullscreenExitAndSettle(window.element, previousFrame: nil, deadline: .now() + 1.5) { [weak self] settled in
+            guard let self = self else { return }
+            guard !self.axBool(window.element, AXFullscreenAttribute),
+                  let frame = self.axFrame(window.element) else {
+                self.onFeedback?("⚠︎ \(self.appName(window.pid)) won't exit fullscreen")
+                return
+            }
+            if !settled {
+                log.notice("fullscreen exit didn't settle in time — moving anyway")
+            }
+            let primaryFrame = self.displayManager.currentDisplays().first?.frame ?? .zero
+            let refreshed = AXWindow(element: window.element,
+                                     pid: window.pid,
+                                     frame: frame,
+                                     cgWindowID: self.cgWindowID(pid: window.pid, frame: frame, primaryFrame: primaryFrame),
+                                     isMinimized: false)
+            action(refreshed)
+        }
+    }
+
+    /// Polls (~100 ms ticks) until the window is out of native fullscreen AND its
+    /// frame has held still for two consecutive reads (the exit animation runs
+    /// ~0.5 s). `completion(false)` on deadline; the caller decides how to degrade.
+    private func awaitFullscreenExitAndSettle(_ element: AXUIElement,
+                                              previousFrame: CGRect?,
+                                              deadline: DispatchTime,
+                                              completion: @escaping (Bool) -> Void) {
+        if DispatchTime.now() > deadline {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            let fullscreen = self.axBool(element, AXFullscreenAttribute)
+            guard !fullscreen, let frame = self.axFrame(element) else {
+                self.awaitFullscreenExitAndSettle(element, previousFrame: nil, deadline: deadline, completion: completion)
+                return
+            }
+            if let previous = previousFrame,
+               abs(frame.minX - previous.minX) < 2, abs(frame.minY - previous.minY) < 2,
+               abs(frame.width - previous.width) < 2, abs(frame.height - previous.height) < 2 {
+                completion(true)
+            } else {
+                self.awaitFullscreenExitAndSettle(element, previousFrame: frame, deadline: deadline, completion: completion)
+            }
+        }
+    }
+
+    private func performBringOver(away: AXWindow, from source: DisplayInfo, displays: [DisplayInfo], direction: Direction) {
+        guard let target = displayManager.otherDisplay(than: source, in: displays, direction: direction) else {
+            log.notice("no other display found")
+            onFeedback?("⚠︎ No display that way")
+            return
+        }
+
+        // Background move: the target's active Space is fullscreen — park the
+        // window on that display's desktop Space, take no focus, touch no Space.
+        let background = FullscreenGuard.spaceHasFullscreenWindow(on: target)
+        let revealed = background ? nil : topmostRevealedWindow(on: target,
+                                                                excludingWindowID: away.cgWindowID,
+                                                                excludingPid: away.pid,
+                                                                primaryFrame: displays[0].frame)
+        if background {
+            log.notice("target \(target.name, privacy: .public) has a fullscreen Space → background move")
+        } else if revealed == nil {
+            log.notice("reveal capture: nothing suitable found on \(target.name, privacy: .public)")
+        } else if let r = revealed {
+            log.notice("reveal capture: \(self.appName(r.pid), privacy: .public) frame=\(self.rect(r.frame), privacy: .public)")
+        }
+
+        let newFrame = Geometry.targetFrame(window: away.frame, source: source, target: target)
+        log.notice("placement: \(self.rect(away.frame), privacy: .public) → \(self.rect(newFrame), privacy: .public) on \(target.name, privacy: .public)")
+
+        memory = WindowMemory(pid: away.pid,
+                              cgWindowID: away.cgWindowID,
+                              originFrame: away.frame,
+                              originDisplayID: source.displayID,
+                              revealed: revealed,
+                              arrivedInBackground: background)
+
+        let element = away.element
+        let pid = away.pid
+        let windowID = away.cgWindowID
+        mover.move(element: element, pid: pid, from: away.frame, to: newFrame) { [weak self] success in
+            guard let self = self else { return }
+            if !success {
+                self.onFeedback?("⚠︎ \(self.appName(pid)) resisted the move")
+            }
+            if background {
+                self.onFeedback?("⇄ behind fullscreen — ⌃→ to reach it")
+            } else {
+                self.focusElement(element, pid: pid)
+                if let windowID = windowID {
+                    FullscreenGuard.hintIfHidden(windowID: windowID) { [weak self] message in
+                        self?.onFeedback?(message)
+                    }
+                }
+            }
+        }
+    }
+
+    private func performSendHome(_ mem: WindowMemory, away: AXWindow, fallbackDisplay: DisplayInfo) {
+        let element = away.element
+        mover.move(element: element, pid: mem.pid, from: away.frame, to: mem.originFrame) { [weak self] success in
+            guard let self = self else { return }
+            log.notice("sent \(self.appName(mem.pid), privacy: .public) home to \(self.rect(mem.originFrame), privacy: .public) settled=\(success, privacy: .public)")
+            if !success {
+                self.onFeedback?("⚠︎ \(self.appName(mem.pid)) resisted the move")
+            }
+            if mem.arrivedInBackground {
+                // Focus was never taken from the user on arrival — leave it alone.
+                log.notice("refocus: none — arrival was a background move")
+                return
+            }
+            if let revealed = mem.revealed {
+                log.notice("refocus: revealed \(self.appName(revealed.pid), privacy: .public) frame=\(self.rect(revealed.frame), privacy: .public)")
+                self.focusWindow(pid: revealed.pid, frameHint: revealed.frame)
+            } else {
+                log.notice("refocus: no captured reveal — falling back to topmost on \(fallbackDisplay.name, privacy: .public)")
+                self.refocusTopmostWindow(on: fallbackDisplay, excludingPid: mem.pid)
+            }
         }
     }
 
@@ -454,31 +562,7 @@ final class WindowManager {
         return unsafeBitCast(value, to: CFBoolean.self) == kCFBooleanTrue
     }
 
-    // MARK: - AX writes
-
-    /// Size first, then position (position is authoritative and re-asserted once more
-    /// shortly after, since Electron apps occasionally drift on resize).
-    private func setAXFrame(_ element: AXUIElement, _ frame: CGRect) {
-        setAXSize(element, frame.size)
-        setAXPosition(element, frame.origin)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.setAXPosition(element, frame.origin)
-        }
-    }
-
-    private func setAXPosition(_ element: AXUIElement, _ point: CGPoint) {
-        var value = point
-        if let ref = AXValueCreate(.cgPoint, &value) {
-            AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, ref)
-        }
-    }
-
-    private func setAXSize(_ element: AXUIElement, _ size: CGSize) {
-        var value = size
-        if let ref = AXValueCreate(.cgSize, &value) {
-            AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, ref)
-        }
-    }
+    // MARK: - AX writes are owned by WindowMover (glide + verified landing)
 
     // MARK: - Focus (AX-based: NSRunningApplication.activate() alone no-ops from a
     // background app on macOS 14+)
@@ -514,16 +598,14 @@ final class WindowManager {
     }
 
     /// Last-resort refocus when nothing was captured: frontmost suitable window on
-    /// the display the user is staying on.
+    /// the display the user is staying on. Called at move completion (arrival),
+    /// so no extra delay is needed.
     private func refocusTopmostWindow(on display: DisplayInfo, excludingPid: pid_t) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            if let top = self.topmostRevealedWindow(on: display,
-                                                    excludingWindowID: nil,
-                                                    excludingPid: excludingPid,
-                                                    primaryFrame: display.frame) {
-                self.focusWindow(pid: top.pid, frameHint: top.frame)
-            }
+        if let top = topmostRevealedWindow(on: display,
+                                            excludingWindowID: nil,
+                                            excludingPid: excludingPid,
+                                            primaryFrame: display.frame) {
+            focusWindow(pid: top.pid, frameHint: top.frame)
         }
     }
 
@@ -537,10 +619,6 @@ final class WindowManager {
         "(\(Int(r.minX)),\(Int(r.minY)) \(Int(r.width))x\(Int(r.height)))"
     }
 
-    private func point(_ p: CGPoint) -> String {
-        "(\(Int(p.x)),\(Int(p.y)))"
-    }
-
     /// Human-readable dump of everything the toggle sees. Copied to the clipboard by
     /// the menu item; the fastest way to answer "why wasn't window X detected".
     func diagnosticsDump() -> String {
@@ -551,12 +629,13 @@ final class WindowManager {
         let displays = displayManager.currentDisplays()
         lines.append("Displays (\(displays.count)):")
         for d in displays {
-            lines.append("  \(d.isPrimary ? "primary" : "secondary"): \(d.name) id=\(d.displayID) frame=\(self.rect(d.frame)) visible=\(self.rect(d.visibleFrame))")
+            let fullscreen = FullscreenGuard.spaceHasFullscreenWindow(on: d) ? " [fullscreen Space]" : ""
+            lines.append("  \(d.isPrimary ? "primary" : "secondary"): \(d.name) id=\(d.displayID) frame=\(self.rect(d.frame)) visible=\(self.rect(d.visibleFrame))\(fullscreen)")
         }
 
         if let mem = memory {
             lines.append("Memory: away=\(self.appName(mem.pid)) pid=\(mem.pid) cg=\(mem.cgWindowID.map(String.init) ?? "nil")")
-            lines.append("  origin=\(self.rect(mem.originFrame)) onDisplay=\(mem.originDisplayID)")
+            lines.append("  origin=\(self.rect(mem.originFrame)) onDisplay=\(mem.originDisplayID) arrivedInBackground=\(mem.arrivedInBackground)")
             if let r = mem.revealed {
                 lines.append("  revealed=\(self.appName(r.pid)) pid=\(r.pid) frame=\(self.rect(r.frame))")
             } else {

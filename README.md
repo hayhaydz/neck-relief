@@ -6,10 +6,10 @@ other display and back, with one hotkey, so you never type with your neck turned
 ## The loop it enables
 
 1. Glance at Slack/Asana on the secondary display (fine for <20s).
-2. Need to reply? Hit `⌘⌥→` — the window lands **on your primary, centered on your
-   mouse, same size, on top**, with keyboard focus.
+2. Need to reply? Hit `⌘⌥→` — the window glides to your **primary, at the same
+   position it had on the other monitor, same size, on top**, with keyboard focus.
 3. Type with a straight neck.
-4. Hit `⌘⌥→` again — from anywhere — the window returns to its **exact remembered
+4. Hit `⌘⌥→` again — from anywhere — the window glides back to its **exact remembered
    spot** on the secondary, and focus lands back on the window it had covered.
 
 One key, one verb: the hotkey is a **chainable flip**. press → type in Slack →
@@ -27,19 +27,27 @@ Accessibility) when prompted. Enable **Launch at Login** from the menu-bar item.
 
 ## Behavior notes
 
-- **Placement:** exact same size, centered on the mouse when the mouse is on the target
-  display, otherwise same offset as it had on the source display; always kept inside the
-  visible area.
+- **Placement (round 3):** same position, other monitor — the window's offset from
+  its display's origin is preserved exactly (size unchanged, proportional downscale
+  only when it can't fit), always clamped inside the visible area. Deterministic:
+  repeated flips land pixel-identical. (Cursor-relative placement was removed —
+  landings depended on where the mouse happened to sit.)
+- **Animation & reliability:** moves glide ~200 ms with ease-in-out easing (instant
+  when Reduce Motion is on). Landings are *verified* — the frame is read back and
+  re-asserted while the app drifts it (Electron…); a stubborn app is reported via
+  the menu bar. Rapid presses cancel the in-flight glide and re-target from
+  wherever the window is.
 - **Focus:** follow-the-window via the Accessibility API (plain `activate()` silently
-  no-ops from background apps on macOS 14+). Sending a window home restores focus to
-  the window it had covered on arrival.
+  no-ops from background apps on macOS 14+), applied on arrival. Sending a window
+  home restores focus to the window it had covered on arrival.
 - **Sticky toggle:** one window is "away" at a time. Pressing the hotkey while working
   (focused elsewhere) flips the away window home; clicking a *different* window on the
   away display and pressing the hotkey starts a new away-window instead.
-- **Fullscreen:** macOS won't put a window above a native-fullscreen Space. If the
-  landing display is fullscreen, Neck Relief switches that display to its desktop Space
-  automatically (synthesized `⌃`-arrow) to reveal the window. If that fails, the
-  menu-bar item shows a hint.
+- **Fullscreen:** never touches your Spaces. If the landing display's active Space is
+  fullscreen, the window is moved **in the background** — it parks on that display's
+  desktop Space, the fullscreen window and your focus stay untouched; reach it later
+  manually (`⌃→` or exit fullscreen). A fullscreen *focused* window exits fullscreen
+  first, then moves as a normal window (sending it home never re-fullscreens it).
 - **Permissions:** Accessibility only. No screen recording, no notifications.
 
 ## Develop

@@ -12,8 +12,14 @@ SIGN_IDENTITY := $(shell security find-identity -v -p codesigning 2>/dev/null | 
 logs:
 	@log stream --predicate 'subsystem == "com.hayhaydz.neckrelief"' --style compact
 
+# Plain `swift build` fails under a pure Command Line Tools install (XCBuild
+# init error); point DEVELOPER_DIR at Xcode when it's present, like `test` does.
 build:
-	swift build -c release
+	@if [ -d /Applications/Xcode.app ]; then \
+		DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build -c release; \
+	else \
+		swift build -c release; \
+	fi
 
 test:
 	@if [ -d /Applications/Xcode.app ]; then \

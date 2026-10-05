@@ -61,35 +61,40 @@ public enum Geometry {
         return CGRect(origin: origin, size: frame.size)
     }
 
-    /// Placement rule (revised 2026-10-02, round 2):
+    /// Placement rule (revised 2026-10-02, round 3):
     /// - size preserved exactly (proportional downscale only if it can't fit)
-    /// - cursor on the target display → the window hangs from the cursor (top edge at
-    ///   it, horizontally centered) when it fits below; otherwise it centers on the
-    ///   cursor — so it never gets shoved far away by edge clamping
-    /// - otherwise (cursor shares the window's display) → the window keeps the same
-    ///   offset from the target display's origin as it had from the source's:
-    ///   same position, other monitor
+    /// - the window keeps the same offset from the target display's origin as it
+    ///   had from the source's: same position, other monitor — every time,
+    ///   regardless of where the mouse sits (cursor-relative rules made landings
+    ///   inconsistent between presses and were removed)
     /// - always clamped fully inside the target's visible frame
     public static func targetFrame(window: CGRect,
-                                   source: DisplayInfo,
-                                   target: DisplayInfo,
-                                   mouse: CGPoint) -> CGRect {
+                                    source: DisplayInfo,
+                                    target: DisplayInfo) -> CGRect {
         let size = scaledToFit(window.size,
                                maxSize: CGSize(width: target.visibleFrame.width,
                                                height: target.visibleFrame.height))
         let offset = CGPoint(x: window.minX - source.frame.minX,
                              y: window.minY - source.frame.minY)
-
-        let origin: CGPoint
-        if target.frame.contains(mouse) {
-            let hangsFromCursor = mouse.y - size.height >= target.visibleFrame.minY
-            let y = hangsFromCursor ? mouse.y - size.height : mouse.y - size.height / 2
-            origin = CGPoint(x: mouse.x - size.width / 2, y: y)
-        } else {
-            origin = CGPoint(x: target.frame.minX + offset.x,
+        let origin = CGPoint(x: target.frame.minX + offset.x,
                              y: target.frame.minY + offset.y)
-        }
         return clamped(CGRect(origin: origin, size: size), to: target.visibleFrame)
+    }
+
+    /// Smoothstep easing: symmetric ease-in-out with exact 0→0 and 1→1 endpoints.
+    /// Input is clamped to 0…1.
+    public static func smoothstep(_ t: CGFloat) -> CGFloat {
+        let c = min(max(t, 0), 1)
+        return c * c * (3 - 2 * c)
+    }
+
+    /// Linear interpolation between two rects at fraction `t`. `t` is not clamped
+    /// (callers pass eased values in 0…1).
+    public static func interpolate(from a: CGRect, to b: CGRect, t: CGFloat) -> CGRect {
+        CGRect(x: a.minX + (b.minX - a.minX) * t,
+               y: a.minY + (b.minY - a.minY) * t,
+               width: a.width + (b.width - a.width) * t,
+               height: a.height + (b.height - a.height) * t)
     }
 
     /// Distance metric between two non-overlapping (or overlapping) rects — used to pick
@@ -119,8 +124,16 @@ final class DisplayManager {
         }
     }
 
+    /// Exact containment first; a point in the gap between displays (mid-flight
+    /// frames, bezel dead zone) resolves to the nearest display instead of nil.
     func display(containing point: CGPoint, in displays: [DisplayInfo]) -> DisplayInfo? {
-        displays.first { $0.frame.contains(point) }
+        if let hit = displays.first(where: { $0.frame.contains(point) }) {
+            return hit
+        }
+        let dot = CGRect(origin: point, size: .zero)
+        return displays.min {
+            Geometry.gap(dot, $0.frame) < Geometry.gap(dot, $1.frame)
+        }
     }
 
     /// The display to hand a window to, given the source display and a direction.
