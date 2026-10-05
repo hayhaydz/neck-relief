@@ -428,13 +428,24 @@ final class WindowManager {
 
     // MARK: - Identity helpers
 
-    /// Loose window match: same pid is required; the CG id, when both sides have one,
-    /// must agree. Either side lacking an id (common with Electron) is tolerated.
+    /// Loose window match: same pid is required (the caller checks); the CG id,
+    /// when both sides have one, must agree. When either side lacks an id
+    /// (common with Electron) the frame decides instead of matching any window
+    /// of the app: size must match the remembered window, and when it sits on
+    /// the origin display its position must be near the remembered spot — so a
+    /// *different* window of the same app isn't conflated with the away window.
     private func sameWindow(_ w: AXWindow, _ mem: WindowMemory) -> Bool {
         if let id = w.cgWindowID, let memID = mem.cgWindowID {
             return id == memID
         }
-        return true
+        guard abs(w.frame.width - mem.originFrame.width) < 2,
+              abs(w.frame.height - mem.originFrame.height) < 2 else { return false }
+        let center = CGPoint(x: w.frame.midX, y: w.frame.midY)
+        guard let origin = displayManager.currentDisplays()
+            .first(where: { $0.displayID == mem.originDisplayID }) else { return true }
+        guard origin.frame.contains(center) else { return true }
+        return abs(w.frame.minX - mem.originFrame.minX) < 40
+            && abs(w.frame.minY - mem.originFrame.minY) < 40
     }
 
     /// Same app even when Electron fronts multiple processes: compare bundle ids.
