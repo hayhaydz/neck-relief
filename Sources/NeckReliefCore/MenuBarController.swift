@@ -4,6 +4,7 @@ import os
 
 /// Owns the status item, menu, hotkey wiring, and lightweight "flash" feedback
 /// (the plan's no-permission-needed alternative to user notifications).
+@MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -171,7 +172,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         button.title = text
         feedbackTimer?.invalidate()
         feedbackTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
-            self?.restoreIcon()
+            MainActor.assumeIsolated {
+                self?.restoreIcon()
+            }
         }
     }
 

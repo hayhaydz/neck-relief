@@ -41,64 +41,24 @@ struct AXWindow {
 /// - Press again — from anywhere: it returns to its exact spot and focus lands on the
 ///   window it had covered.
 /// - Press yet again: it comes back. The state persists until you focus a *different*
-///   window on the away display and press (new intent) or reset from the menu.
+/// window on the away display and press (new intent) or reset from the menu.
 ///
 /// Fullscreen never gets fought for: a fullscreen landing display gets a *background
 /// move* (window parks on its desktop Space, focus untouched), and a fullscreen
 /// window exits fullscreen before moving.
+@MainActor
 final class WindowManager {
 
     var onFeedback: ((String) -> Void)?
 
     private let displayManager = DisplayManager()
+    private let coordinates = CoordinateSystem()
     private let mover = WindowMover()
     private var memory: WindowMemory?
 
-    /// macOS 27 was observed returning CGWindowList bounds already in AppKit
-    /// (bottom-left) coordinates, while older systems use top-left. Probed once,
-    /// cached. `nil` = not yet probed.
-    private var cgNeedsFlip: Bool?
-
-    /// Converts a CGWindowList bounds rect into AppKit global coordinates, probing
-    /// the coordinate system on first use.
+    /// Converts a CGWindowList bounds rect into AppKit global coordinates.
     private func cgToAX(_ bounds: CGRect, primaryFrame: CGRect) -> CGRect {
-        let flips = cgNeedsFlip ?? detectCGFlip(primaryFrame: primaryFrame)
-        cgNeedsFlip = flips
-        return flips ? Geometry.appKitRect(fromCG: bounds, primaryFrame: primaryFrame) : bounds
-    }
-
-    /// Decides whether CGWindowList bounds need the y-flip by comparing a few live
-    /// CG windows against their AX counterparts (matched by pid + size + x).
-    /// Inconclusive → no flip (current macOS behavior).
-    private func detectCGFlip(primaryFrame: CGRect) -> Bool {
-        let apps = AppInfoCache()
-        var probed = 0
-        for entry in CGWindowList.onScreen().layerZero.fromRegularApps(apps).contentSized {
-            guard probed < 3 else { break }
-            probed += 1
-            for frame in axFramesOnly(pid: entry.ownerPID)
-            where abs(frame.width - entry.bounds.width) < 5
-                && abs(frame.height - entry.bounds.height) < 5
-                && abs(frame.minX - entry.bounds.minX) < 5 {
-                if abs(frame.minY - entry.bounds.minY) < 10 {
-                    log.notice("CG probe: CG already matches AX (no flip)")
-                    return false
-                }
-                let flippedY = primaryFrame.maxY - entry.bounds.maxY
-                if abs(frame.minY - flippedY) < 10 {
-                    log.notice("CG probe: CG is top-left origin (flip needed)")
-                    return true
-                }
-            }
-        }
-        log.notice("CG probe inconclusive — assuming no flip")
-        return false
-    }
-
-    /// Frame-only AX window list (no CG id resolution — safe to call while probing).
-    private func axFramesOnly(pid: pid_t) -> [CGRect] {
-        AXHelpers.windowElements(of: AXUIElementCreateApplication(pid))
-            .compactMap { AXHelpers.frame(of: $0) }
+        coordinates.appKitRect(fromCG: bounds, primaryFrame: primaryFrame)
     }
 
     // MARK: - Toggle
@@ -578,7 +538,7 @@ final class WindowManager {
     func diagnosticsDump() -> String {
         var lines: [String] = []
         lines.append("== Neck Relief diagnostics — \(Date()) ==")
-        lines.append("CG→AX coordinates: \(cgNeedsFlip == nil ? "not probed yet" : (cgNeedsFlip! ? "flipped (top-left origin)" : "identity (already AppKit)"))")
+        lines.append("CG→AX coordinates: \(coordinates.probeStateDescription)")
 
         let displays = displayManager.currentDisplays()
         lines.append("Displays (\(displays.count)):")

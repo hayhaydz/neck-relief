@@ -5,6 +5,7 @@ public enum NeckReliefMain {
 
     private static var delegateKeeper: AppDelegate?
 
+    @MainActor
     public static func run() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -15,6 +16,7 @@ public enum NeckReliefMain {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController?
 
