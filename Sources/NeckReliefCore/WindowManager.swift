@@ -515,10 +515,14 @@ final class WindowManager {
     /// the display the user is staying on. Called at move completion (arrival),
     /// so no extra delay is needed.
     private func refocusTopmostWindow(on display: DisplayInfo, excludingPid: pid_t) {
+        // The CG→AX y-flip is computed against the *primary* display's frame —
+        // passing the scanned display's frame skews every converted y on
+        // systems where the flip is needed and the fallback isn't the primary.
+        let primaryFrame = displayManager.currentDisplays().first?.frame ?? display.frame
         if let top = topmostRevealedWindow(on: display,
-                                            excludingWindowID: nil,
-                                            excludingPid: excludingPid,
-                                            primaryFrame: display.frame) {
+                                           excludingWindowID: nil,
+                                           excludingPid: excludingPid,
+                                           primaryFrame: primaryFrame) {
             focusWindow(pid: top.pid, frameHint: top.frame)
         }
     }
