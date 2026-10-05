@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 
@@ -25,6 +26,12 @@ enum AXHelpers {
               let value = ref,
               CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
         return unsafeBitCast(value, to: CFBoolean.self) == kCFBooleanTrue
+    }
+
+    /// Casts a CF value to AXUIElement only after verifying its CF type.
+    static func element(_ ref: CFTypeRef) -> AXUIElement? {
+        guard CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+        return unsafeBitCast(ref, to: AXUIElement.self)
     }
 
     /// The app element's window list, skipping entries that aren't AX elements.
@@ -89,5 +96,16 @@ enum AXHelpers {
     private static func axValue(_ ref: CFTypeRef, type: AXValueType) -> AXValue {
         assert(CFGetTypeID(ref) == AXValueGetTypeID() && AXValueGetType(unsafeBitCast(ref, to: AXValue.self)) == type)
         return unsafeBitCast(ref, to: AXValue.self)
+    }
+}
+
+/// Readable formatting for logs and the diagnostics dump.
+enum Format {
+    static func rect(_ r: CGRect) -> String {
+        "(\(Int(r.minX)),\(Int(r.minY)) \(Int(r.width))x\(Int(r.height)))"
+    }
+
+    static func appName(_ pid: pid_t) -> String {
+        NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid:\(pid)"
     }
 }
